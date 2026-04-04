@@ -57,7 +57,7 @@ def train(device):
         model = DDP(model, device_ids=[device], gradient_as_bucket_view=True, find_unused_parameters=False)
 
     if use_hpu:
-        model = torch.compile(model, backend='hpu')
+        model = torch.compile(model, backend='hpu_backend')
     else:
         model = torch.compile(model)
 
@@ -84,8 +84,8 @@ def train(device):
         return_tensors='pt'
     )
     num_epochs = 5
-    batch_size = 48
-    grad_accum_iters = 16
+    batch_size = 64
+    grad_accum_iters = 6
     learning_rate = 3e-4
 
     optimizer = optim.AdamW(
@@ -152,7 +152,8 @@ def train(device):
 
 def main():
     if use_ddp:
-        torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
+        if not use_hpu:
+            torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
         acc = torch.accelerator.current_accelerator()
         backend = torch.distributed.get_default_backend_for_device(acc)
         dist.init_process_group(backend)
