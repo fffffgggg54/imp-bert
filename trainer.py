@@ -22,6 +22,9 @@ from transformers import AutoModelForMaskedLM, AutoModel, AutoConfig, AutoTokeni
 use_ddp=True
 use_hpu=True
 
+if use_hpu:
+    from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
+
 def getDataLoader(dataset, batch_size, epoch, collate_fn=None):
     num_workers = 10
     return torch.utils.data.DataLoader(
@@ -87,7 +90,7 @@ def train(device):
         return_tensors='pt'
     )
     num_epochs = 5
-    batch_size = 24
+    batch_size = 1
     grad_accum_iters = 16
     learning_rate = 3e-4
 
