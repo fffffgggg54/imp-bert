@@ -54,7 +54,10 @@ def train(device):
     ).to(device)
 
     if (use_ddp):
-        model = DDP(model, device_ids=[device], gradient_as_bucket_view=True, find_unused_parameters=False)
+        if use_hpu:
+            model = DDP(model)
+        else:
+            model = DDP(model, device_ids=[device], gradient_as_bucket_view=True, find_unused_parameters=False)
 
     if use_hpu:
         model = torch.compile(model, backend='hpu_backend')
@@ -159,7 +162,7 @@ def main():
         rank = dist.get_rank()
         
         if use_hpu:
-            device = 'hpu'
+            device = torch.device('hpu')
         else:
             device = rank % torch.accelerator.device_count()
     else:
