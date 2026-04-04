@@ -19,7 +19,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers import AutoModelForMaskedLM, AutoModel, AutoConfig, AutoTokenizer, DataCollatorForLanguageModeling
 
 
-use_ddp=True
+use_ddp=False
 use_hpu=True
 
 if use_hpu:
