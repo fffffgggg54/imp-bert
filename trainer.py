@@ -22,18 +22,18 @@ from transformers import AutoModelForMaskedLM, AutoModel, AutoConfig, AutoTokeni
 use_ddp=False
 use_hpu=True
 
-if use_hpu:
-    from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
+#if use_hpu:
+#    from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
 
 def getDataLoader(dataset, batch_size, epoch, collate_fn=None):
-    num_workers = 10
+    #num_workers = 10
     return torch.utils.data.DataLoader(
         dataset, 
         batch_size = batch_size, 
         #shuffle=True, 
-        num_workers=num_workers, 
-        persistent_workers = False, 
-        prefetch_factor=2, 
+        #num_workers=num_workers, 
+        #persistent_workers = False, 
+        #prefetch_factor=2, 
         generator=torch.Generator().manual_seed(41),
         collate_fn=collate_fn,
     )
