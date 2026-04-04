@@ -87,8 +87,8 @@ def train(device):
         return_tensors='pt'
     )
     num_epochs = 5
-    batch_size = 64
-    grad_accum_iters = 6
+    batch_size = 24
+    grad_accum_iters = 16
     learning_rate = 3e-4
 
     optimizer = optim.AdamW(
