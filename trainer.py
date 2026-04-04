@@ -170,7 +170,10 @@ def main():
         else:
             device = rank % torch.accelerator.device_count()
     else:
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        if use_hpu:
+            device = torch.device('hpu')
+        else:
+            device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     train(device)
 
     if use_ddp:
