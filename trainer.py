@@ -31,9 +31,9 @@ def getDataLoader(dataset, batch_size, epoch, collate_fn=None):
         dataset, 
         batch_size = batch_size, 
         #shuffle=True, 
-        #num_workers=num_workers, 
-        #persistent_workers = False, 
-        #prefetch_factor=2, 
+        num_workers=num_workers, 
+        persistent_workers = False, 
+        prefetch_factor=2, 
         generator=torch.Generator().manual_seed(41),
         collate_fn=collate_fn,
     )
@@ -90,7 +90,7 @@ def train(device):
         return_tensors='pt'
     )
     num_epochs = 5
-    batch_size = 1
+    batch_size = 24
     grad_accum_iters = 16
     learning_rate = 3e-4
 
