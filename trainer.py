@@ -32,8 +32,8 @@ def getDataLoader(dataset, batch_size, epoch, collate_fn=None):
         batch_size = batch_size, 
         #shuffle=True, 
         #num_workers=num_workers, 
-        persistent_workers = False, 
-        prefetch_factor=2, 
+        #persistent_workers = False, 
+        #prefetch_factor=2, 
         generator=torch.Generator().manual_seed(41),
         collate_fn=collate_fn,
     )
