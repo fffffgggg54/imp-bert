@@ -100,7 +100,7 @@ def train(device):
     )
 
 
-    scaler = torch.amp.GradScaler('cuda')
+    scaler = torch.amp.GradScaler(device.type)
     model.train()
 
     for epoch in range(num_epochs):
