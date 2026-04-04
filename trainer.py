@@ -131,7 +131,8 @@ def train(device):
                 perplexity = math.exp(loss_mlm.detach().item())
 
                 if is_optim_step_iter:
-                    torch.cuda.synchronize()
+                    if not use_hpu and use_ddp:
+                        torch.cuda.synchronize()
                     scaler.unscale_(optimizer)
                     nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0, norm_type=2)
                     scaler.step(optimizer)
