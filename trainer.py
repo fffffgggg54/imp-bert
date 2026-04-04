@@ -152,14 +152,16 @@ def train(device):
 
 def main():
     if use_ddp:
-        if not use_hpu:
-            torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
+        torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
         acc = torch.accelerator.current_accelerator()
         backend = torch.distributed.get_default_backend_for_device(acc)
         dist.init_process_group(backend)
         rank = dist.get_rank()
         
-        device = rank % torch.accelerator.device_count()
+        if use_hpu:
+            device = 'hpu'
+        else:
+            device = rank % torch.accelerator.device_count()
     else:
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     train(device)
