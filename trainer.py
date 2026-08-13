@@ -1,6 +1,6 @@
 import torch
 import torch.distributed as dist
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
 from datasets.distributed import split_dataset_by_node
 import transformers
 import torch.nn as nn
@@ -14,6 +14,9 @@ import sys
 import math
 import contextlib
 import signal
+import time
+
+import pandas as pd
 
 import multiprocessing
 
@@ -24,46 +27,13 @@ from transformers import AutoModelForMaskedLM, AutoModel, AutoConfig, AutoTokeni
 
 from timm.utils import ModelEmaV3
 
-use_ddp=False
+use_ddp=True
 use_hpu=False
 
 # via https://github.com/facebookresearch/dinov2/blob/main/dinov2/loss/koleo_loss.py
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This source code is licensed under the Apache License, Version 2.0
-class KoLeoLoss(nn.Module):
-    """Kozachenko-Leonenko entropic loss regularizer from Sablayrolles et al. - 2018 - Spreading vectors for similarity search"""
-
-    def __init__(self):
-        super().__init__()
-        self.pdist = nn.PairwiseDistance(2, eps=1e-8)
-
-    def pairwise_NNs_inner(self, x):
-        """
-        Pairwise nearest neighbors for L2-normalized vectors.
-        Uses Torch rather than Faiss to remain on GPU.
-        """
-        # parwise dot products (= inverse distance)
-        dots = torch.mm(x, x.t())
-        n = x.shape[0]
-        dots.view(-1)[:: (n + 1)].fill_(-1)  # Trick to fill diagonal with -1
-        # max inner prod -> min distance
-        _, I = torch.max(dots, dim=1)  # noqa: E741
-        return I
-
-    def forward(self, student_output, eps=1e-8):
-        """
-        Args:
-            student_output (BxD): backbone output of student
-        """
-        with torch.cuda.amp.autocast(enabled=False):
-            student_output = F.normalize(student_output, eps=eps, p=2, dim=-1)
-            I = self.pairwise_NNs_inner(student_output)  # noqa: E741
-            distances = self.pdist(student_output, student_output[I])  # BxD, BxD -> B
-            loss = -torch.log(distances + eps).mean()
-        return loss
-
-# Gemini-3.1-Pro
-# functional version of code above
+# modified from a module to a functional version of code above by Gemini-3.1-Pro
 def ko_leo_loss(student_output, eps=1e-8):
     """
     Kozachenko-Leonenko entropic loss regularizer.
@@ -101,7 +71,7 @@ def ko_leo_loss(student_output, eps=1e-8):
 #    from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
 
 def getDataLoader(dataset, batch_size, epoch, collate_fn=None):
-    num_workers = 10
+    num_workers = 40
     return torch.utils.data.DataLoader(
         dataset, 
         batch_size = batch_size, 
@@ -122,11 +92,104 @@ def filter_state_dict(state_dict):
         out_dict[k] = v
     return out_dict
 
+def tokenize_function_a_b_gene(examples, tokenizer=None):
+    sequences_with_spaces = []
+    
+    # Use zip to iterate through all rows in the current batch simultaneously
+    for i in range(len(examples['v_call_alpha'])):
+        # Extract values for the current row
+        v_a = str(examples['v_call_alpha'][i])
+        j_aa_a = str(examples['junction_aa_alpha'][i])
+        j_call_a = str(examples['j_call_alpha'][i])
+        
+        v_b = str(examples['v_call_beta'][i])
+        j_aa_b = str(examples['junction_aa_beta'][i])
+        j_call_b = str(examples['j_call_beta'][i])
+        
+        # Format the amino acids: "C A S S" (space between each letter)
+        # We treat Gene IDs as single "words" (tokens)
+        aa_alpha_spaced = " ".join(list(j_aa_a))
+        aa_beta_spaced = " ".join(list(j_aa_b))
+        
+        # Construct the full string:
+        # [GENE_V_A] [CDR3_A_SPACED] [GENE_J_A] [SEP] [GENE_V_B] [CDR3_B_SPACED] [GENE_J_B]
+        full_seq = (
+            f"{v_a} {aa_alpha_spaced} {j_call_a} "
+            f"{tokenizer.sep_token} "
+            f"{v_b} {aa_beta_spaced} {j_call_b}"
+        )
+        
+        sequences_with_spaces.append(full_seq)
+
+    tokenizer_outputs = tokenizer(sequences_with_spaces, truncation=True, max_length=512, padding=False, add_special_tokens=False)
+    
+    return tokenizer_outputs
+
+def tokenize_mhc_epi(examples, tokenizer=None):
+    sequences_with_spaces = []
+    
+    # Use zip to iterate through all rows in the current batch simultaneously
+    for i in range(len(examples['gene'])):
+        # Extract values for the current row
+        gene = str(examples['gene'][i])
+        epitope = str(examples['peptide'][i])
+        epitope_aa_spaced = " ".join(list(epitope))
+        
+        # Construct the full string:
+        # [MHC_gene] [epitope]
+        full_seq = f"{gene} {epitope_aa_spaced}"
+        
+        sequences_with_spaces.append(full_seq)
+
+    tokenizer_outputs = tokenizer(sequences_with_spaces, truncation=True, max_length=512, padding=False, add_special_tokens=False)
+    
+    return tokenizer_outputs
+
 def train(device):
     is_head_proc = not use_ddp or dist.get_rank() == 0
 
+    
+
+    #tokenizer = AutoTokenizer.from_pretrained('answerdotai/ModernBERT-base')
+    tokenizer = AutoTokenizer.from_pretrained('facebook/esm2_t30_150M_UR50D')
+    
+    #ds = load_dataset("HuggingFaceFW/fineweb", name="sample-10BT", split="train", streaming=True)
+    #ds = load_dataset("bloyal/uniref50", split="train", streaming=False)
+
+    # TCR alpha + beta with genes
+    
+    df = pd.read_csv('../alpha_beta_gene_mlm/ab_gene_processed.csv')
+    ds = Dataset.from_pandas(df)
+    gene_cols = ['v_call_beta', 'j_call_beta', 'v_call_alpha', 'j_call_alpha']
+
+    all_genes = []
+    for col in gene_cols:
+        print(col)
+        for gene in df[col].value_counts().keys():
+            all_genes.append(gene)
+    
+    num_added_tokens = tokenizer.add_tokens(all_genes)
+    print(f"Added {num_added_tokens} tokens")
+    tokenizer.add_special_tokens({"sep_token": "<sep>"})
+    assert "<sep>" in tokenizer.get_vocab(), "Failed to add <sep> token"
+
+
+    # pMHC
+    '''
+    df = pd.read_csv('./data/pMHC/SysteMHC_2.0_deduped.csv')
+    ds = Dataset.from_pandas(df)
+    gene_col = 'gene'
+    all_genes = []
+    for gene in df[gene_col].value_counts().keys():
+        all_genes.append(gene)
+
+    num_added_tokens = tokenizer.add_tokens(all_genes)
+    print(f"Added {num_added_tokens} tokens")
+    '''
+
     #config = AutoConfig.from_pretrained("answerdotai/ModernBERT-base")
     config = AutoConfig.from_pretrained("facebook/esm2_t30_150M_UR50D")
+    config.vocab_size = len(tokenizer)
     model = AutoModelForMaskedLM.from_config(
         config,
         #attn_implementation='sdpa'
@@ -139,7 +202,7 @@ def train(device):
         if use_hpu:
             model = DDP(model)
         else:
-            model = DDP(model, device_ids=[device], gradient_as_bucket_view=True, find_unused_parameters=False)
+            model = DDP(model, device_ids=[device], gradient_as_bucket_view=True, find_unused_parameters=True)
     
     do_compile=True
 
@@ -151,22 +214,26 @@ def train(device):
             model = torch.compile(model)
             model_ema = torch.compile(model_ema)
 
-    #tokenizer = AutoTokenizer.from_pretrained('answerdotai/ModernBERT-base')
-    tokenizer = AutoTokenizer.from_pretrained('facebook/esm2_t30_150M_UR50D')
-    
-    #ds = load_dataset("HuggingFaceFW/fineweb", name="sample-10BT", split="train", streaming=True)
-    ds = load_dataset("bloyal/uniref50", split="train", streaming=True)
 
+    ds = ds.shuffle()
     if (use_ddp):
         ds = split_dataset_by_node(ds, rank=dist.get_rank(), world_size=dist.get_world_size())
 
-    ds = ds.map(lambda x: tokenizer(x['text'], truncation=True, max_length=512, padding=False, add_special_tokens=False), batched=True, remove_columns=ds.column_names)
-
     print(ds.info)
 
-    ds_len = ds.info.splits['train'].num_examples
-    if use_ddp:
-        ds_len = ds_len // dist.get_world_size()
+    #ds_len = ds.info.splits['train'].num_examples
+    ds_len = len(ds)
+
+    #ds = ds.to_iterable_dataset(num_shards=40)
+    #ds = ds.map(lambda x: tokenizer(x['text'], truncation=True, max_length=512, padding=False, add_special_tokens=False), batched=True, remove_columns=ds.column_names)
+    #ds = ds.map(lambda x: tokenizer(x['text'], truncation=True, max_length=512, padding=False, add_special_tokens=False), batched=True, num_proc=40, remove_columns=ds.column_names)
+
+    ds = ds.map(partial(tokenize_function_a_b_gene, tokenizer=tokenizer), batched=True, num_proc=128, remove_columns=ds.column_names)
+    #ds = ds.map(partial(tokenize_mhc_epi, tokenizer=tokenizer), batched=True, num_proc=128, remove_columns=ds.column_names)
+    
+    
+    #if use_ddp:
+    #    ds_len = ds_len // dist.get_world_size()
 
 
     full_data_collator = DataCollatorForLanguageModeling(
@@ -188,10 +255,10 @@ def train(device):
         return full_data_collator(examples), mlm_data_collator(examples)
 
 
-    num_epochs = 1
-    batch_size = 192
-    grad_accum_iters = 8
-    learning_rate = 1e-4
+    num_epochs = 10
+    batch_size = 768
+    grad_accum_iters = 1
+    learning_rate = 3e-4
 
     optimizer = optim.AdamW(
         [
@@ -206,7 +273,7 @@ def train(device):
     model.train()
 
     for epoch in range(num_epochs):
-        train_dataloader = getDataLoader(ds, batch_size, epoch, collate_fn=joint_collate)
+        train_dataloader = getDataLoader(ds, batch_size, epoch, collate_fn=joint_collate, prefetch_factor=3)
         lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer, 
             max_lr=learning_rate, 
@@ -216,6 +283,8 @@ def train(device):
             pct_start=0.1
         )
         lr_scheduler.last_epoch = (ds_len // batch_size) * epoch
+        start_time = time.time()
+        toks_elapsed = 0
         for i, (full_batch, mlm_batch) in enumerate(train_dataloader):
             full_batch = {k: v.to(device, non_blocking=True) for k, v in full_batch.items()}
             mlm_batch = {k: v.to(device, non_blocking=True) for k, v in mlm_batch.items()}
@@ -224,23 +293,24 @@ def train(device):
             ddp_sync_context = contextlib.nullcontext() if is_optim_step_iter or not use_ddp else model.no_sync()
             with torch.amp.autocast(device.type, enabled=True, dtype=torch.bfloat16), ddp_sync_context:
                 outputs = model(**mlm_batch, output_hidden_states=True)
-                #student_repr = outputs.hidden_states[-1][mlm_batch['labels'] != -100].flatten(end_dim=-2)
+                student_repr = outputs.hidden_states[-1][mlm_batch['labels'] != -100].flatten(end_dim=-2)
 
-                #with torch.no_grad():
-                #    outputs_ema = model_ema(**full_batch, output_hidden_states=True)
-                #    teacher_repr = outputs_ema.hidden_states[-1][mlm_batch['labels'] != -100].flatten(end_dim=-2)
+                with torch.no_grad():
+                    outputs_ema = model_ema(**full_batch, output_hidden_states=True)
+                    teacher_repr = outputs_ema.hidden_states[-1][mlm_batch['labels'] != -100].flatten(end_dim=-2)
 
 
                 loss_mlm = outputs.loss
-                #loss_mse = F.mse_loss(student_repr, teacher_repr)
-                #loss_ko_leo = ko_leo_loss(student_repr)
+                loss_mse = F.mse_loss(student_repr, teacher_repr)
+                loss_ko_leo = ko_leo_loss(student_repr)
 
-                loss = loss_mlm #+ 1.0 * loss_mse + 0.3 * loss_ko_leo
+                loss = loss_mlm + 1.0 * loss_mse + 0.1 * loss_ko_leo
 
-                #loss = 1.0 * loss_mlm + 1.0 * loss_distogram + 2.0 * structure_loss + 0.5 * loss_distogram_self_distill * int(epoch > 0)
 
                 scaler.scale(loss).backward()
                 perplexity = math.exp(loss_mlm.detach().item())
+
+                toks_elapsed = toks_elapsed + full_batch['attention_mask'].sum().item()
 
                 if is_optim_step_iter:
                     if not use_hpu and use_ddp:
@@ -251,24 +321,28 @@ def train(device):
                     scaler.update()
                     optimizer.zero_grad(set_to_none=True)
 
-                    #if do_compile:
-                    #    model_ema._orig_mod.update(model)
-                    #else:
-                    #    model_ema.update(model)
+                    if do_compile:
+                        model_ema._orig_mod.update(model)
+                    else:
+                        model_ema.update(model)
 
                 lr_scheduler.step()
             if (i+1) % grad_accum_iters == 0 and is_head_proc:
-                print(f"Epoch {epoch+1}/{num_epochs} | Batch {i + 1}/{ds_len // batch_size} | Loss (MLM): {loss_mlm.item():.4f} | PPLX: {perplexity:.4f} | Loss (MSE): {loss_mse.item():.4f} | Loss (KoLeo): {loss_ko_leo.item():.4f}")
+                toks_per_sec = toks_elapsed / (time.time() - start_time)
+                print(f"Epoch {epoch+1}/{num_epochs} | Batch {i + 1}/{ds_len // batch_size} | Loss (MLM): {loss_mlm.item():.4f} | PPLX: {perplexity:.4f} | Loss (MSE): {loss_mse.item():.4f} | Loss (KoLeo): {loss_ko_leo.item():.4f} | toks/s: {toks_per_sec:.2f}")
+                toks_elapsed = 0
+                start_time = time.time()
                 sys.stdout.flush()
             #torch.cuda.empty_cache()
             #p.step()
         torch.cuda.synchronize()
         if is_head_proc:
-            checkpoint_name = f"ESM2_150M_UR50_1epoch_MSE0.0_KoLeo0.0/epoch_{epoch}"
+            checkpoint_name = f"ESM2_150M_TCR_a_b_gene_10epoch_MSE1.0_KoLeo0.1_SepToken/epoch_{epoch}"
             if use_ddp:
                 model.module.save_pretrained(f"./outputs/{checkpoint_name}")
             else:
                 model.save_pretrained(f"./outputs/{checkpoint_name}")
+            tokenizer.save_pretrained(f"./outputs/{checkpoint_name}")
             torch.save(optimizer.state_dict(), f"./outputs/{checkpoint_name}/optimizer.pth")
 
 
